@@ -5,31 +5,68 @@
 Name: tsort
 Description: topological sort
 Author: Jeffrey S. Haemer
-License:
+License: perl
 
 =end metadata
 
 =cut
 
-
 use strict;
 
-use vars qw($opt_b $opt_d);
-use Getopt::Std;
-my $usage = "usage: $0 [-b|-d] [filename]\n";
-getopts("bd") or die $usage;
-die $usage if ($opt_b && $opt_d);
+use File::Basename qw(basename);
+use Getopt::Std qw(getopts);
+
+use constant EX_SUCCESS => 0;
+use constant EX_FAILURE => 1;
+
+my $Program = basename($0);
+
+my %opt;
+getopts('bd', \%opt) or usage();
+usage() if ($opt{'b'} && $opt{'d'});
+
+my $file = shift @ARGV;
+if (@ARGV) {
+    warn "$Program: extra operand '$ARGV[0]'\n";
+    usage();
+}
+my $fh;
+if (defined $file) {
+    if (-d $file) {
+        warn "$Program: '$file' is a directory\n";
+        exit EX_FAILURE;
+    }
+    unless (open $fh, '<', $file) {
+        warn "$Program: '$file': $!\n";
+        exit EX_FAILURE;
+    }
+} else {
+    $fh = *STDIN;
+}
 
 my %pairs;	# all pairs ($l, $r)
 my %npred;	# number of predecessors
 my %succ;	# list of successors
+my @input;
 
-while (<>) {
-    my ($l, $r) = my @l = split;
-    next unless @l == 2;
+while (<$fh>) {
+    next unless m/\w/;
+    s/\A\s+//;
+    s/\s+\z//;
+    my @l = split;
+    push @input, @l if scalar(@l);
+}
+if (scalar(@input) % 2 == 1) {
+    warn "$Program: odd number of tokens\n";
+    exit EX_FAILURE;
+}
+while (@input) {
+    my $l = shift @input;
+    my $r = shift @input;
     next if defined $pairs{$l}{$r};
     $pairs{$l}{$r}++;
-    $npred {$l} += 0;
+    $npred{$l} += 0;
+    next if $l eq $r;
     ++$npred{$r};
     push @{$succ{$l}}, $r;
 }
@@ -41,7 +78,7 @@ while (@list) {
     $_ = pop @list;
     print "$_\n";
     foreach my $child (@{$succ{$_}}) {
-	if ($opt_b) {	# breadth-first
+	if ($opt{'b'}) {	# breadth-first
 	    unshift @list, $child unless --$npred{$child};
 	} else {	# depth-first (default)
 	    push @list, $child unless --$npred{$child};
@@ -50,7 +87,17 @@ while (@list) {
     }
 }
 
-warn "cycle detected\n" if grep {$npred{$_}} keys %npred;
+warn "$Program: cycle detected\n" if grep {$npred{$_}} keys %npred;
+unless (close $fh) {
+    warn "$Program: failed to close input: $!\n";
+    exit EX_FAILURE;
+}
+exit EX_SUCCESS;
+
+sub usage {
+    warn "usage: $Program [-b|-d] [filename]\n";
+    exit EX_FAILURE;
+}
 
 =head1 NAME
 
@@ -65,6 +112,7 @@ tsort - topological sort
 =over 2
 
 Does a topological sort of input pairs.
+Input is taken from the standard input if no filename argument is provided.
 
 For a more complete description, see the tsort(1) man page,
 For an explanation of the algorithm,
@@ -84,14 +132,9 @@ breadth-first or depth-first (default) traversal
 =item B<filename>
 
 Optional input file.
-Input format is pairs of white-space-separated fields,
-one pair per line.
+Input format is pairs of white-space-separated fields.
 Each field is the name of a node.
-
 Output is the topologically sorted list of nodes.
-
-Ignores lines without at least two fields.
-Ignores all fields on the line except the first two.
 
 =back
 
