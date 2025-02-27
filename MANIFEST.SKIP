@@ -86,4 +86,16 @@ bin/pmake
 \.icloud$
 \A\.github\b
 
-^util/
+util/
+
+output.txt
+\.gitattributes\b
+
+bin/perldoc
+bin/perlpowertools
+packed/
+packer/
+
+PROGRAMMING_STYLE.md
+.perltidyrc
+.token

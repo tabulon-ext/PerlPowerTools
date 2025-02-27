@@ -4,77 +4,178 @@
 
 Name: fmt
 Description: reformat paragraphs
-Author: Dmitri Tiknonov dmitri@cpan.org
+Author: Dmitri Tikhonov dmitri@cpan.org
 License: perl
 
 =end metadata
 
 =cut
 
-
 use strict;
-use warnings;
 
+use File::Basename qw(basename);
 use Getopt::Long;
 
-my $MAX_WIDTH = 75;
+use constant EX_SUCCESS => 0;
+use constant EX_FAILURE => 1;
 
-# Take care of special case, bare -width option:
-@ARGV = grep {
-    if (/^-(\d+)$/) {
-        $MAX_WIDTH = $1;
-        0;
-    } else {
-        1;
-    }
-} @ARGV;
+use constant MAX => 75;
 
+my $Program = basename($0);
+
+my $MAX_WIDTH = MAX;
+my @linedesc;
+
+@ARGV = new_argv();
+Getopt::Long::config('bundling');
 GetOptions(
-    "width=i"   => \$MAX_WIDTH,
-    "help"      => sub { &print_usage; exit; },
-);
+    'w=i' => \$MAX_WIDTH,
+) or usage();
+if ($MAX_WIDTH <= 0) {
+    warn "$Program: width must be positive\n";
+    exit EX_FAILURE;
+}
 
-my $fmt_line = '<' x $MAX_WIDTH;
+my $rc = EX_SUCCESS;
+foreach my $file (@ARGV) {
+    if (-d $file) {
+        warn "$Program: '$file' is a directory\n";
+        $rc = EX_FAILURE;
+        next;
+    }
+    my $fh;
+    unless (open $fh, '<', $file) {
+        warn "$Program: failed to open '$file': $!\n";
+        $rc = EX_FAILURE;
+        next;
+    }
+    fmt_file($fh);
+    unless (close $fh) {
+        warn "$Program: failed to close '$file': $!\n";
+        $rc = EX_FAILURE;
+    }
+}
+unless (@ARGV) {
+    fmt_file(*STDIN);
+}
+while (@linedesc) {
+    fmt_line() # remainder
+}
+exit $rc;
 
-my $line;
+sub usage {
+    warn "usage: $Program [-w WIDTH] [file...]\n";
+    exit EX_FAILURE;
+}
 
-eval <<"FORMAT";
-format =
-^$fmt_line~~
-\$line
-.
-FORMAT
+sub fmt_file {
+    my $fh = shift;
 
-while (<>) {
-    chomp;
-    if (length) {
-        if (length $line) {
-            my $last_char = substr $line, -1, 1;
-            if ('.' eq $last_char) {
-                $line .= "  ";
-            } elsif (' ' ne $last_char and "\t" ne $last_char) {
-                $line .= " ";
+    while (<$fh>) {
+        chomp;
+        fmt_line();
+        my @line = split_line($_);
+        push @linedesc, @line;
+    }
+}
+
+sub split_line {
+    my $line = shift;
+
+    my $indent = 0;
+    if ($line =~ s/\A(\s+)//) {
+        $indent = length $1;
+    }
+    my @tok;
+    while (length $line) {
+        if ($line =~ s/\A(\S+)//) {
+            my $t = {};
+            $t->{'indent'} = $indent;
+            $t->{'word'}   = $1;
+            $t->{'len'}    = length $1;
+            $t->{'suffix'} = 1;
+            if ($line =~ s/\A(\s+)//) {
+                $t->{'suffix'} = length $1;
+            }
+            push @tok, $t;
+        }
+    }
+    my $end = { 'len' => 0 };
+    push @tok, $end;
+    return @tok;
+}
+
+sub fmt_line {
+    return unless @linedesc;
+
+    my $max = int($MAX_WIDTH * 1.05);
+    my $remain = $max;
+    my (@out, $tok);
+    my $indent;
+
+    while (@linedesc) {
+        $tok = shift @linedesc;
+        if ($tok->{'len'} == 0) {
+            next unless @linedesc;
+            next if $linedesc[0]->{'len'} != 0; # "\n\n" paragraph
+            shift @linedesc;
+            $tok->{'len'} = 1;
+            $tok->{'word'} = "\n";
+            $tok->{'suffix'} = 0;
+            $tok->{'indent'} = 0;
+        }
+        unless (defined $indent) {
+            $indent = $tok->{'indent'};
+            $remain -= $indent;
+        }
+        my $len = $tok->{'len'} + $tok->{'suffix'};
+        if (@out) {
+            if ($remain - $len < 0) { # word overrun
+                unshift @linedesc, $tok;
+                last;
+            }
+            if ($out[-1]->{'len'} && $out[-1]->{'indent'} != $tok->{'indent'}){
+                unshift @linedesc, $tok; # mismatch indent paragraph
+                last;
             }
         }
-        $line .= $_;
-    } else {
-        do write while length $line;
-        print "\n";
+        $remain -= $len;
+        push @out, $tok;
     }
+
+    return unless @out;
+    my $s = ' ' x $out[0]->{'indent'};
+    print $s;
+
+    $out[-1]->{'suffix'} = 0;
+    foreach $tok (@out) {
+        $s = $tok->{'word'};
+        $s .= ' ' x $tok->{'suffix'};
+        print $s;
+    }
+    print "\n";
+    return;
 }
 
-if (length $line) {
-    do write while length $line;
-}
+# Take care of special case, bare -width option
+sub new_argv {
+    my @new;
+    my $end = 0;
 
-exit;
+    foreach my $arg (@ARGV) {
+        if ($arg eq '--' || $arg !~ m/\A\-/) {
+            push @new, $arg;
+            $end = 1;
+            next;
+        }
 
-sub print_usage {
-    (my $prog = $0) =~ s~.*[/\\]~~;
-    print <<"USAGE";
-Usage: $0 [-w WIDTH] [file...]
-
-USAGE
+        if (!$end && $arg =~ m/\A\-([0-9]+)\Z/) { # historic
+            push @new, "-w$1";
+        } else {
+            push @new, $arg;
+        }
+    }
+    return @new;
 }
 
 __END__
@@ -85,12 +186,13 @@ fmt - simple text formatter
 
 =head1 SYNOPSIS
 
-B<fmt> [-WIDTH] [OPTION]... [FILE]...
+B<fmt> [-w WIDTH] [file...]
 
 =head1 DESCRIPTION
 
-Reformat each paragraph in FILE(s), writing to standard output.  The
-option -WIDTH is an abbreviated form of -w DIGITS.
+Reformat paragraphs of text read from the input files (or standard input if
+none are provided), writing to standard output.
+The option -WIDTH is an abbreviated form of -w DIGITS.
 
 =head1 OPTIONS
 
@@ -101,11 +203,11 @@ option -WIDTH is an abbreviated form of -w DIGITS.
 Maximum line width.  This option can be specified in shortened version,
 -DIGITS.  The default is 75.
 
-=item -h
-
-Print help screen and exit.
-
 =back
+
+=head1 EXIT STATUS
+
+The fmt utility exits 0 on success, and >0 to indicate an error
 
 =head1 BUGS
 
