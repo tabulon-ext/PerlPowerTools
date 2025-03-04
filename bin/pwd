@@ -13,18 +13,30 @@ License: perl
 
 
 use strict;
-use Cwd;
 
-my ($VERSION) = '1.2';
+use Cwd qw(cwd getcwd);
+use Getopt::Std qw(getopts);
 
-my $dir;
+my ($VERSION) = '1.4';
 
-# Account for / and \ on Win32 and non-Win32 systems
-($^O=~/Win32/) ? ($dir = getcwd) =~s/\//\\/g : ($dir=getcwd);
-
+my %opt;
+getopts('LP', \%opt) or usage();
+usage() if @ARGV;
+my $dir = $opt{'L'} ? cwd() : getcwd(); # default -P
+unless (defined $dir) {
+	warn "pwd: $!\n";
+	exit 1;
+}
+if ($^O =~ m/Win32/) {
+	$dir =~ tr/\//\\/;
+}
 print $dir . "\n";
-
 exit;
+
+sub usage {
+	warn "usage: pwd [-L|-P]\n";
+	exit 1;
+}
 
 __END__
 
