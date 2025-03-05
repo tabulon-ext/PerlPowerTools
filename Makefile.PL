@@ -55,7 +55,7 @@ use File::Spec::Functions qw(catfile);
 my $home = home();
 unless( $has_install_base ) {
 	my $path = catfile($home, 'perlpowertools');
-	print <<"HERE";
+	print <<"HERE" unless caller();
 ----------------------------------------------------------------------
 Welcome to Perl Power Tools (http://www.perlpowertools.com).
 
@@ -90,8 +90,6 @@ while( <$manifest_fh> ) {
 	push @exe_files, $_;
 	}
 
-print "EXE_FILES [@exe_files]\n";
-
 close $manifest_fh;
 
 my $module    = __PACKAGE__;
@@ -107,7 +105,7 @@ my %WriteMakefile = (
 	'ABSTRACT_FROM' => $main_file,
 	'VERSION_FROM'  => $main_file,
 	'LICENSE'       => 'perl',
-	'AUTHOR'        => 'brian d foy <bdfoy@cpan.org>',
+	'AUTHOR'        => 'brian d foy <briandfoy@pobox.com>',
 
 	'EXE_FILES'     => \@exe_files,
 
@@ -120,14 +118,15 @@ my %WriteMakefile = (
 		},
 
 	'TEST_REQUIRES' => {
-		'IPC::Run3'  => '0',
-		'Test::More' => '1',
+		'IPC::Run3'      => '0',
+		'Test::More'     => '1',
+		'Test::Pod'      => '0',
+		'Test::Warnings' => '0',
 		},
 
 	'PREREQ_PM'     => {
 		'App::a2p'       => '0',
 		'App::find2perl' => '0',
-		'MIME::Parser'   => '0',
 		},
 
 	'META_MERGE' => {
@@ -135,19 +134,23 @@ my %WriteMakefile = (
 		resources => {
 			repository => {
 				type => 'git',
-				url  => "$github.git",
+				url  => $github,
 				web  => $github,
 				},
 			bugtracker => {
-				web    => "$github/issues",
+				web  => "$github/issues",
 				},
 			homepage => "https://www.perlpowertools.com/",
 			},
 		},
 
 	clean => { FILES => "$dist-*" },
+	test => {TESTS => 't/*.t t/*/*.t'}
 	);
 
+# This module uses Test::Deep, which has a dependency that requires
+# v5.12.
+$WriteMakefile{PREREQ_PM}{'MIME::Parser'} = 0 if $] >= 5.012;
 
 sub arguments { \%WriteMakefile }
 

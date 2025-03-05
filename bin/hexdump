@@ -1,0 +1,349 @@
+#!/usr/bin/perl
+
+=begin metadata
+
+Name: hexdump
+Description: print input as hexadecimal
+Author: Michael Mikonos
+License: artistic2
+
+=end metadata
+
+=cut
+
+use strict;
+
+use File::Basename qw(basename);
+use Getopt::Std qw(getopts);
+
+use constant EX_SUCCESS => 0;
+use constant EX_FAILURE => 1;
+
+my $Program = basename($0);
+my $VERSION = '0.1';
+
+my (%opt, @chars, @cesc, $adr, $dump, $fmt, $nread, $curf, $skip, $prev, $dupl);
+
+sub VERSION_MESSAGE {
+    print "$Program version $VERSION\n";
+    exit;
+}
+
+sub getchar {
+    my $c;
+    my $n = read $curf, $c, 1;
+    unless (defined $n) {
+        warn "$Program: $!\n";
+        exit EX_FAILURE;
+    }
+    return unless $n;
+    $nread++;
+    return $c;
+}
+
+sub doskip {
+    if (seek $curf, $skip, 0) {
+        $adr = $skip;
+        undef $skip;
+        return;
+    }
+    while ($skip) {
+        my $c = getchar();
+        return unless (defined $c);
+        $adr++;
+        $nread--;
+        $skip--;
+    }
+}
+
+sub dump_c {
+    printf "$fmt ", $adr;
+    foreach my $c (@chars) {
+        if ($c =~ m/[[:print:]]/) {
+            printf '%3s ', $c;
+        } else {
+            my $i = ord $c;
+            my $e = $cesc[$i];
+            $e ||= sprintf '%03o ', $i;
+            print $e;
+        }
+    }
+    print "\n";
+    $adr += scalar @chars;
+    undef @chars;
+}
+
+sub dump_hex1 {
+    my $str = join '', @chars;
+    my $hex = unpack 'H*', $str;
+    $hex =~ s/^(.{16})/$1 /;
+    $hex =~ s/(\S{2})/ $1/g;
+    $str =~ s/[^[:print:]]/./g;
+    printf "$fmt ", $adr;
+    printf "%-51s|%s|\n", $hex, $str;
+    $adr += scalar @chars;
+    undef @chars;
+}
+
+sub dump_hex2 {
+    my $str = join '', @chars;
+    my @words = unpack 'S*', $str;
+    printf "$fmt ", $adr;
+    foreach my $i (@words) {
+        printf '  %04x  ', $i;
+    }
+    print "\n";
+    $adr += scalar @chars;
+    undef @chars;
+}
+
+sub dump_dec2 {
+    my $str = join '', @chars;
+    my @words = unpack 'S*', $str;
+    printf "$fmt ", $adr;
+    foreach my $i (@words) {
+        printf ' %05d  ', $i;
+    }
+    print "\n";
+    $adr += scalar @chars;
+    undef @chars;
+}
+
+sub dump_oct1 {
+    printf "$fmt ", $adr;
+    foreach my $c (@chars) {
+        my $i = ord $c;
+        printf '%03o ', $i;
+    }
+    print "\n";
+    $adr += scalar @chars;
+    undef @chars;
+}
+
+sub dump_oct2 {
+    my $str = join '', @chars;
+    my @words = unpack 'S*', $str;
+    printf "$fmt ", $adr;
+    foreach my $i (@words) {
+        printf ' %06o ', $i;
+    }
+    print "\n";
+    $adr += scalar @chars;
+    undef @chars;
+}
+
+sub dofile {
+    doskip() if $skip;
+    my $c;
+    while (defined($c = getchar())) {
+        push @chars, $c;
+        if (scalar(@chars) == 16) {
+            unless ($opt{'v'}) {
+                my $str = join '', @chars;
+                if ($str eq $prev) {
+                    print "*\n" unless $dupl;
+                    $dupl = 1;
+                    $adr += 16;
+                    undef @chars;
+                    next;
+                }
+                $dupl = 0;
+                $prev = $str;
+            }
+            &$dump;
+        }
+        if ($opt{'n'} && $opt{'n'} == $nread) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+sub revert {
+    while (readline) {
+        my $start = index $_, ' '; # after offset
+        if ($start == -1) {
+            warn "$Program: parse error: $_";
+            exit EX_FAILURE;
+        }
+        my $end = index $_, '|';
+        if ($end == -1) {
+            $_ = substr $_, $start;
+        } else {
+            $_ = substr $_, $start, $end - $start;
+        }
+        s/\s//g;
+        if (m/[^[:xdigit:]]/) {
+            warn "$Program: non-hex digits '$_'\n";
+            exit EX_FAILURE;
+        }
+        my $len = length;
+        next unless $len;
+        if ($len & 1) {
+            warn "$Program: odd digits '$_'\n";
+            exit EX_FAILURE;
+        }
+        print pack('H*', $_);
+    }
+}
+
+sub xd {
+    $prev = '';
+    $adr = $nread = 0;
+    $fmt = '%08lx';
+    $dump = \&dump_hex2;
+
+    if ($opt{'b'}) {
+        $dump = \&dump_oct1;
+    } elsif ($opt{'C'}) {
+        $dump = \&dump_hex1;
+    } elsif ($opt{'c'}) {
+        $fmt = '%07lx';
+        $dump = \&dump_c;
+        $cesc[0]  = ' \0 ';
+        $cesc[7]  = ' \a ';
+        $cesc[8]  = ' \b ';
+        $cesc[9]  = ' \t ';
+        $cesc[10] = ' \n ';
+        $cesc[11] = ' \v ';
+        $cesc[12] = ' \f ';
+        $cesc[13] = ' \r ';
+    } elsif ($opt{'d'}) {
+        $dump = \&dump_dec2;
+    } elsif ($opt{'o'}) {
+        $dump = \&dump_oct2;
+    }
+    if (@ARGV) {
+        while (@ARGV) {
+            my $path = shift @ARGV;
+            if (-d $path) {
+                warn "$Program: $path: is a directory\n";
+                next;
+            }
+            unless (open $curf, '<', $path) {
+                warn "$Program: $path: $!\n";
+                exit EX_FAILURE;
+            }
+            last if (dofile() != 0);
+        }
+    } else {
+        $curf = *STDIN;
+        dofile();
+    }
+    &$dump if @chars; # odd bytes at end
+    printf "$fmt\n", $adr;
+}
+
+getopts('bCcdn:ors:vx', \%opt)
+    or do {
+    	warn "usage: $Program [-bCcdorvx] [-n length] [-s skip] [file ...]\n";
+    	exit EX_FAILURE;
+    	};
+
+$| = 1;
+foreach (qw(n s)) {
+    if ($opt{$_} && $opt{$_} =~ m/\D/) {
+        warn "$Program: bad -$_ argument\n";
+        exit EX_FAILURE;
+    }
+}
+$skip = $opt{'s'};
+$opt{'r'} ? revert() : xd();
+
+__END__
+
+=pod
+
+=head1 NAME
+
+hexdump - print input as hexadecimal
+
+=head1 SYNOPSIS
+
+hexdump [-bCcdovx] [-n NUMBER] [-s NUMBER] [file ...]
+
+hexdump [-r] [file ...]
+
+=head1 DESCRIPTION
+
+Input files are taken as a single stream of data and formatted as hexadecimal.
+Standard input is used if no file arguments are provided.
+Duplicate lines of input are filtered by default.
+A '*' character is printed to indicate one or more duplicate input lines.
+
+=head2 OPTIONS
+
+The following options are available:
+
+=over 4
+
+=item -b
+
+One-byte octal output.
+
+=item -C
+
+Output canonical hex+ASCII. Each line begins with an offset number followed
+by a space-separated list of 16 hex bytes.
+Printable input characters are listed between two '|' characters.
+
+=item -c
+
+Output a space-separated list of ASCII characters. Non-print characters
+are listed in octal, or a C-escape code.
+
+=item -d
+
+Format output as two-byte decimal.
+
+=item -n NUMBER
+
+Terminate the process after reading a set NUMBER of input bytes.
+The number argument must be given in decimal. Input skipped by the -s
+option is not counted.
+
+=item -o
+
+Format output as two-byte octal.
+
+=item -r
+
+Revert a hex dump back to binary. Input is expected to be formatted as
+canonical hex+ASCII. The initial offset address and the ASCII suffix of
+each line are ignored. Input lines may have zero or more hex bytes;
+running over 16 bytes  is supported. Spaces between hex digits are ignored.
+An odd number of hex digits on a line results in an error.
+
+Setting -r causes all other options.
+It is possible to specify multiple input files.
+
+=item -s NUMBER
+
+Skip a set NUMBER of bytes at the beginning of input. The number argument
+must be given in decimal. The offset number printed on output is advanced
+to reflect the skipped bytes.
+
+=item -v
+
+Duplicate lines of output are displayed.
+
+=item -x
+
+Format output as two-byte hexadecimal. This is the default.
+
+=back
+
+=head1 BUGS
+
+No option exists for setting an output filename, so the -r option will
+write binary data to a terminal if output is not redirected.
+
+=head1 AUTHOR
+
+Written by Michael Mikonos.
+
+=head1 COPYRIGHT
+
+Copyright (c) 2023 Michael Mikonos.
+
+This code is licensed under the Artistic License 2.

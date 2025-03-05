@@ -24,26 +24,32 @@ License: perl
 # 99/03/02 : first version
 #
 
-$| = 1;
+use strict;
 
+use File::Basename qw(basename);
+use File::Spec;
 use Getopt::Long;  # because of some special handling on numeric options
 
-use strict;
-use vars qw($opt_b $opt_c $opt_f $opt_h $opt_n $opt_r);
+use constant EX_SUCCESS => 0;
+use constant EX_FAILURE => 1;
 
-use File::Basename;
+use vars qw($opt_b $opt_c $opt_f $opt_n $opt_r);
+
 my $me = basename $0;
 
-sub usage($;$)
+$| = 1;
+
+sub usage
 {
-    print STDERR "$_[1]\n" if $_[1];
+    my $msg = shift;
+    print STDERR "$msg\n" if defined $msg;
     print STDERR <<EOF;
 Usage:
-    tail [-f | -r] [-h] [-b number | -c number | -n number | [-+]number]
+    tail [-f | -r] [-b number | -c number | -n number | [-+]number]
         [file ...]
-    xtail [-h] file ...
+    xtail file ...
 EOF
-    exit $_[0];
+    exit EX_FAILURE;
 }
 
 # Maybe I should use stat() to retrieve the block size ? But the BSD man
@@ -52,52 +58,73 @@ my $block_size = 512;
 
 # Command-line parsing
 
-sub check_number($)
+sub check_number
 {
     my $opt = shift;
-    if ($opt =~ /\+(\d+)$/) {
-    return $1+0;
-    } elsif      ($opt =~ /-?(\d+)$/) {
-    return -($1+0);
+    if ($opt =~ m/\A\+(\d+)\Z/) {
+        return $1+0;
+    } elsif ($opt =~ m/\A\-?(\d+)\Z/) {
+        return -($1+0);
     } else {
-    usage(1);
+        usage("invalid number '$opt'");
     }
 }
 
-sub parse_args()
+sub new_argv
+{
+    my @new;
+    my $end = 0;
+
+    foreach my $arg (@ARGV) {
+        if ($arg eq '--' || $arg !~ m/\A[\-\+]/) {
+            push @new, $arg;
+            $end = 1;
+            next;
+        }
+
+        if (!$end && $arg =~ m/\A([\-\+][0-9]+)\Z/) { # historic
+            push @new, "-n$1";
+        } else {
+            push @new, $arg;
+        }
+    }
+    return @new;
+}
+
+sub parse_args
 {
     my $files;
     my $point=-10;
     my $type="n"; # one of "b", "c" or "n"
 
-    # If called as xtail, then no option is used except -h
+    # If called as xtail, then no option is used
     if ($me eq "xtail") {
 
-    GetOptions("h");
-    usage 0 if $opt_h;
+    GetOptions('') or usage();
 
     } else {
 
-    # special handling for -numeric options
-        Getopt::Long::config("pass_through");
-    GetOptions("b=s", "c=s", "f", "h", "n=s", "r");
-
-    usage 0 if $opt_h;
-    usage 1, "-f and -r cannot be used together"
+    @ARGV = new_argv();
+    Getopt::Long::config('bundling');
+    GetOptions("b=s", "c=s", "f", "n=s", "r") or usage();
+    usage('-f and -r cannot be used together')
         if $opt_f and $opt_r;
 
-    $point = check_number($opt_b), $type = "b" if $opt_b;
-    $point = check_number($opt_c), $type = "c" if $opt_c;
-    $point = check_number($opt_n), $type = "n" if $opt_n;
-
-    for (@ARGV) {
-        $point = check_number($1), shift @ARGV, last
-        if /^([-+].*)$/;
+    if (defined $opt_b) {
+        usage() if (defined($opt_c) || defined($opt_n));
+        $point = check_number($opt_b);
+        $type = 'b';
+    } elsif (defined $opt_c) {
+        usage() if (defined($opt_b) || defined($opt_n));
+        $point = check_number($opt_c);
+        $type = 'c';
+    } elsif (defined $opt_n) {
+        usage() if (defined($opt_b) || defined($opt_c));
+        $point = check_number($opt_n);
+        $type = 'n';
     }
 
-    usage 1, "The number cannot be null" if $point == 0;
-
-    $point = $point ? $point : -10;
+    usage('The number cannot be zero') if $point == 0;
     }
 
     $files = [ @ARGV ];
@@ -107,7 +134,7 @@ sub parse_args()
 
 # Prints the tail of a file according to the options passed on the
 # command line.
-sub print_tail(*$$$)
+sub print_tail
 {
     my ($fh, $f, $point, $type) = @_;
 
@@ -214,16 +241,20 @@ my %info;
 my @filelist;
 my @dirlist;
 
-sub get_existing_files(\@\@)
+sub get_existing_files
 {
     my ($filelist, $dirlist) = @_;
 
     my @files = grep { -e $_ } @$filelist;
 
-    for my $d(@$dirlist) {
-    opendir(DIR, $d) or die "can't open directory $d: $!";
-    push @files, map { "$d/$_" } grep { -f "$d/$_" } readdir(DIR);
-    closedir DIR;
+    for my $d (@$dirlist) {
+        opendir(DIR, $d) or die "can't open directory $d: $!\n";
+        while (my $ent = readdir(DIR)) {
+            my $path = File::Spec->catfile($d, $ent);
+            next unless -f $path;
+            push @files, $path;
+        }
+        closedir DIR;
     }
 
     # Remove the duplicates.
@@ -241,14 +272,13 @@ sub get_existing_files(\@\@)
 # xtail C source code, improvements could be obtained using fstat() on file
 # handles instead of stat(). I'll do something if people need it.
 
-sub tail_f(\@\@$$)
+sub tail_f
 {
-    @filelist = @{shift @_};
-    @dirlist = @{shift @_};
-    my ($point, $type) = @_;
+    my ($files, $dirs, $point, $type) = @_;
+    @filelist = @{ $files };
+    @dirlist = @{ $dirs };
 
-    local $SIG{'INT'}  = \&handle_INT;
-    local $SIG{'QUIT'} = sub { exit 0 }; # do not core dump
+    local $SIG{'QUIT'} = \&handle_INT;
 
     my ($ino, $size, $mtime);
 
@@ -256,7 +286,7 @@ sub tail_f(\@\@$$)
     (undef, $ino, undef, undef, undef, undef, undef, $size,
      undef, $mtime) = stat($_);
     $info{$_} = [$ino, $size, $mtime];
-    } get_existing_files(@filelist, @dirlist);
+    } get_existing_files($files, $dirs);
 
     my $current;
 
@@ -270,7 +300,7 @@ sub tail_f(\@\@$$)
             # Set size to zero to print the whole new file
             $info{$_} = [$ino, 0, $mtime];
             }
-        } get_existing_files(@filelist, @dirlist);
+        } get_existing_files($files, $dirs);
 
         # Loop on files
         for my $file (keys %info) {
@@ -300,7 +330,7 @@ sub tail_f(\@\@$$)
                 print "\n*** '$file' has been truncated or replaced ***\n";
                 print "\n*** $file ***\n";
                 $current = $file;
-                print_tail \*FH, $file, $point, $type;
+                print_tail(\*FH, $file, $point, $type);
                 close FH;
             }
             elsif($size > $oldsize)
@@ -333,7 +363,7 @@ sub tail_f(\@\@$$)
 }
 
 # Prints the recently changed files, the most recent first
-sub handle_INT()
+sub handle_INT
 {
     print "\n*** recently changed files ***\n";
 
@@ -342,7 +372,7 @@ sub handle_INT()
         print sprintf("%3d  %s  %s", $i, scalar localtime($info{$f}[2]), $f)."\n";
         $i++;
     }
-    my @existing = get_existing_files(@filelist, @dirlist);
+    my @existing = get_existing_files(\@filelist, \@dirlist);
     my @unknown = grep {! -e $_} @filelist;
 
     print "currently watching: ".
@@ -351,23 +381,29 @@ sub handle_INT()
 
     # On some systems (NT, for instance), it is necessary to
     # reinstall the signal handler
-    $SIG{'INT'} = \&handle_INT;
+    $SIG{'QUIT'} = \&handle_INT;
 }
 
 #
 # Main function
 #
-sub handle_args($$$)
+sub handle_args
 {
     my ($point, $type, $files_) = @_;
+    my $rc = EX_SUCCESS;
 
     # Expand the directories (but not the sub-directories)
     my @files;
     my @dirs;
 
     for my $f (@$files_) {
-        if(-d $f) {
-             push @dirs, $f;
+        if (-d $f) {
+            if ($opt_f) {
+                push @dirs, $f;
+            } else {
+                warn "$me: '$f' is a directory\n";
+                $rc = EX_FAILURE;
+            }
         } else {
             push @files, $f;
         }
@@ -382,15 +418,16 @@ sub handle_args($$$)
         # do not die if the file does not exist, when -f is used
         next if(!-e $file and ($opt_f or $me eq "xtail"));
 
-        open FH, '<', $file
-        or do { print STDERR
-                "Couldn't open $file for reading: $!\n";
-                exit 1 };
+        unless (open FH, '<', $file) {
+            warn "$me: Couldn't open '$file': $!\n";
+            $rc = EX_FAILURE;
+            next;
+        }
 
         # Do not print the tail of the files if we are using xtail
         unless($me eq "xtail") {
-            print "*** $file ***\n" if(scalar @files >= 2);
-            print_tail \*FH, $file, $point, $type;
+            print "==> $file <==\n" if(scalar @files >= 2);
+            print_tail(\*FH, $file, $point, $type);
             print "\n" if(++$i < scalar(@files));
         }
 
@@ -398,20 +435,18 @@ sub handle_args($$$)
     }
 
     if($opt_f or ($me eq "xtail")) {
-        tail_f(@files, @dirs, $point, $type);
+        tail_f(\@files, \@dirs, $point, $type);
     }
 
     } else {
-        print_tail \*STDIN, "stdout", $point, $type;
+        print_tail(\*STDIN, "stdout", $point, $type);
         # Ignore the -f option
     }
-
+    return $rc;
 }
 
 my ($point, $type, $files) = parse_args();
-handle_args($point, $type, $files);
-
-exit 0;
+exit handle_args($point, $type, $files);
 
 __END__
 
@@ -426,7 +461,7 @@ xtail - watch the growth of files
 tail [B<-f> | B<-r>] [B<-b number> | B<-c number> | B<-n number> |
 B<[-+]number>] [B<file>...]
 
-xtail [B<-h>] file ...
+xtail file ...
 
 =head1 DESCRIPTION
 
@@ -455,11 +490,10 @@ line doesn't exist, the program will watch for it and monitor it once
 created.  When switching files in the display, a banner showing the
 pathname of the file is printed.
 
-An interrupt character (usually CTRL/C or DEL) will display a list of
-the most recently modified files being watched.  Send a quit signal
-(usually CTRL/backslash) to stop the program.
+Send a quit signal (usually CTRL/backslash) to display a list of
+the most recently modified files being watched.
 
-The options are the following for I<tail> (only the B<-h> option is
+The options are the following for I<tail> (no options are
 supported by I<xtail>) :
 
 =over 4
@@ -481,10 +515,6 @@ reopen the file and continue.  If the file is truncated, I<tail> will
 reset its position back to the beginning.  This makes I<tail> more useful
 for watching log files that may get rotated.  The B<-f> option is
 ignored if the standard input is a pipe, but not if it is a FIFO.
-
-=item B<-h>
-
-Displays a short usage message.
 
 =item B<-n> number
 

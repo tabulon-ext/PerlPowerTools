@@ -5,84 +5,73 @@
 Name: rev
 Description: reverse lines of a file
 Author: Andy Murren, andy@murren.org
-License: GNU GPL
+License: gpl
 
 =end metadata
 
 =cut
 
-
-# packages used in this program
-use FileHandle;
 use strict;
-use Carp;
+
+use File::Basename qw(basename);
+use Getopt::Std qw(getopts);
+
+use constant EX_SUCCESS => 0;
+use constant EX_FAILURE => 1;
+
+my $Program = basename($0);
 
 # unbuffer output to make it look speedier
 $|++;
 
-my ($VERSION) = '1.2';
+our $VERSION = '1.5';
 
-# set up some variables
-my $debug = 0;  # 0 for no anything else to debug
-my $file = 0;
-
-if ($ARGV[0] eq '--version') {
-	print " $0 $VERSION\n";
-}
-elsif (($ARGV[0] eq '--help') || ($ARGV[0] eq '?') || ($ARGV[0] eq '-h')) {
-	print <<EOF;
-
-Usage: $0 [OPTION] [FILE]
-
-Reverses lines of the named file or the text input on SDTIN
-
-Options:
-	--version:  Print version number, then exit.
-	--help || -h || ? :     Print usage, then exit;
-
-EOF
-}
-elsif (-f $ARGV[0]) {
-
-	if ($debug) {print "\n\nthis is a file\n\n";}
-	my $fh = FileHandle->new("< $ARGV[0]");  # here is the file handle
-
-	# in case the file handle does not open
-    unless (defined ($fh)) {
-		croak "did not open file $ARGV[0] $!\n";
+getopts('') or usage();
+my $rc = EX_SUCCESS;
+foreach my $file (@ARGV) {
+	if (-d $file) {
+		warn "$Program: '$file' is a directory\n";
+		$rc = EX_FAILURE;
+		next;
 	}
+	my $fh;
+	unless (open $fh, '<', $file) {
+		warn "$Program: cannot open '$file': $!\n";
+		$rc = EX_FAILURE;
+		next;
+	}
+	rev($fh);
+	if ($!) {
+		warn "$Program: '$file': $!\n";
+		$rc = EX_FAILURE;
+	}
+	unless (close $fh) {
+		warn "$Program: cannot close '$file': $!\n";
+		$rc = EX_FAILURE;
+		next;
+	}
+}
+rev(*STDIN) unless @ARGV;
+exit $rc;
 
-	# iterate over the file and put each line into an
-	# array of charaters and print them out in reverse order.
+sub rev {
+	my $fh = shift;
 	while (<$fh>) {
-		my @a = split(//, $_);
-		print reverse @a;
+		chomp;
+		my $r = reverse;
+		print $r, $/;
 	}
-	print "\n";
-	$fh->close;  # close the file handle
-}
-else {
-	if ($debug) {print "\n\nthis is not a file\n\n";}
-
-	# here we start at the end of the array and work to
-	# the start.
-	my $len = @ARGV;
-	for (my $cnt = ($len - 1); $cnt >= 0; $cnt-- ) {
-		my @b = split(//, $ARGV[$cnt]);
-		print reverse @b;
-
-		# since each white space is denotes the next arg
-		# we have to put spaces back in.  $cnt is checked to
-		# see if we have reached the end yet.  If there are
-		# no more args we do not want to append an extra space
-		# that was not on the input.
-
-		if ($cnt) {print ' ';}
-	}
-	print "\n";
 }
 
-exit 1;
+sub usage {
+	print "usage: $Program [file ...]\n";
+	exit EX_FAILURE;
+}
+
+sub VERSION_MESSAGE {
+	print "$Program version $VERSION\n";
+	exit EX_SUCCESS;
+}
 
 __END__
 
@@ -94,7 +83,7 @@ rev - reverse lines of a file
 
 =head1 SYNOPSIS
 
-rev [options] [file]
+rev [file ...]
 
 =head1 DESCRIPTION
 
@@ -108,13 +97,9 @@ I<rev> accepts the following options:
 
 =over 4
 
-=item  --help || -h || ?
-
-Print a short help message, then exits.
-
 =item  --version
 
-Prints out its version number, then exits.
+Print version number then exit
 
 =back
 
@@ -124,7 +109,7 @@ I<rev> has no known bugs.
 
 =head1 AUTHOR
 
-This Perl implmentation of I<rev> was written by Andy Murren,
+This Perl implementation of I<rev> was written by Andy Murren,
 I<andy@murren.org>.
 
 =head1 COPYRIGHT and LICENSE
@@ -133,4 +118,3 @@ This program is covered by the GNU Public License (GPL).
 See I<http://www.gnu.org/copyleft/gpl.html> for complete detail of the license.
 
 =cut
-

@@ -18,11 +18,17 @@ License: perl
 
 use strict;
 
-my $VERSION = '0.27';
+use File::Temp qw();
+
+use constant EX_SUCCESS => 0;
+use constant EX_REJECTS => 1;
+use constant EX_FAILURE => 2;
+
+my $VERSION = '0.35';
 
 $|++;
 
-if (@ARGV && $ARGV[0] eq '-v') {
+sub version {
     print split /^    /m, qq[
         This is patch $VERSION written in Perl.
 
@@ -31,7 +37,28 @@ if (@ARGV && $ARGV[0] eq '-v') {
         You may play with this software in accordance with the
         Perl Artistic License.
     ];
-    exit;
+    exit EX_SUCCESS;
+}
+
+sub type_conflict {
+    my $opts = shift;
+    my @types;
+    my $i = 0;
+    for (qw(context ed normal unified)) {
+        push @types, '--' . $_ if $opts->{$_};
+    }
+    if (scalar(@types) > 1) {
+        warn "$0: incompatible input type specifiers: @types\n";
+        exit EX_FAILURE;
+    }
+    return;
+}
+
+sub ifdef_id_check {
+    my $id = shift;
+    return if (length($id) != 0 && $id =~ m/\A[A-Za-z]\w*\Z/);
+    warn "$0: argument to -D is not an identifier\n";
+    exit EX_FAILURE;
 }
 
 my ($patchfile, @options);
@@ -48,11 +75,11 @@ if (@ARGV) {
         suffix|b=s              force|f                 reject-file|r=s
         prefix|B=s              batch|t                 reverse|R
         context|c               fuzz|F=i                silent|quiet|s
-        check|C                 ignore-whitespace|l     skip|S
+        check|dry-run|C         ignore-whitespace|l     skip|S
         directory|d=s           normal|n                unified|u
         ifdef|D=s               forward|N               version|v
         ed|e                    output|o=s              version-control|V=s
-        remove-empty-files|E    strip|p=i               debug|x=i
+        remove-empty-files|E    strip|p=i
     /;
 
     # Each patch may have its own set of options.  These are separated by
@@ -70,10 +97,14 @@ if (@ARGV) {
     my $next = 0;
     for (@options) {
         local @ARGV = @$_;
-        Getopt::Long::GetOptions(\my %opts, @desc);
+        my %opts;
+        Getopt::Long::GetOptions(\%opts, @desc) or die("Bad options\n");
+        type_conflict(\%opts);
+        ifdef_id_check($opts{'ifdef'}) if defined $opts{'ifdef'};
         $opts{origfile} = shift;
         $_ = \%opts;
         $patchfile = shift unless $next++;
+        version() if $opts{'version'};
     }
 }
 
@@ -81,6 +112,14 @@ $patchfile = '-' unless defined $patchfile;
 
 my $patch = Patch->new(@options);
 
+if (defined $patch->{'directory'}) {
+    unless (chdir $patch->{'directory'}) {
+        die "failed to change to directory '$patch->{directory}': $!\n";
+    }
+}
+if (defined $patch->{'fuzz'} && $patch->{'fuzz'} < 0) {
+    die "$0: fuzz factor is negative: $patch->{fuzz}\n";
+}
 tie *PATCH, Pushback => $patchfile or die "Can't open '$patchfile': $!";
 
 # Extract patches from patchfile.  We unread/pushback lines by printing to
@@ -120,6 +159,11 @@ while (<PATCH>) {
         my ($i_range, $i_start, $i_end, @i_hunk) = ($1, $2, $3 || $2);
         my ($o_range, $o_start, $o_end, @o_hunk);
         $patch->bless('context') or next PATCH;
+        if ($i_start > $i_end) {
+            $patch->note("Malformed input at line $.: $i_range\n");
+            $patch->reject($i_range);
+            last;
+        }
         my $o_hunk = qr/^$space(--- (\d+)(?:,(\d+))? ----\n)/;
         my $re = qr/^$space([ !-] )/;
         $_ = <PATCH>;
@@ -154,6 +198,7 @@ while (<PATCH>) {
             print PATCH;
             for ($o_start..$o_end) {
                 $_ = <PATCH>;
+                last unless defined $_; # EOF: no further hunks
                 unless (s/$re/$1/) {
                     $patch->note("Short hunk ignored.\n");
                     $patch->reject($i_range, @i_hunk, $o_range, @o_hunk);
@@ -168,8 +213,24 @@ while (<PATCH>) {
     } elsif (/^(\s*)((\d+)(?:,(\d+))?([acd])(\d+)(?:,(\d+))?\n)/) {
         # NORMAL DIFF
         my ($space, $range, $i_start, $i_end, $cmd, $o_start, $o_end) =
-           ($1,     $2,     $3,     $4 || $3, $5,   $6,       $7 || $6);
+           ($1,     $2,     $3,       $4,     $5,   $6,       $7 || $6);
         $patch->bless('normal') or next PATCH;
+        if ($cmd eq 'a' && defined($i_end)) { # invalid input "X,YaZ"
+            my $input = $_;
+            chomp $input;
+            $patch->note("Malformed input at line $.: $input\n");
+            $patch->reject($range);
+            last;
+        }
+        $i_end = $i_start unless defined $i_end; # for input "XcY,Z" and "XdY,Z"
+
+        if ($cmd ne 'a' && $i_start > $i_end) { # bad range "2,1c" and "2,1d"
+            my $input = $_;
+            chomp $input;
+            $patch->note("Malformed input at line $.: $input\n");
+            $patch->reject($range);
+            last;
+        }
         my (@d_hunk, @a_hunk);
         my $d_re = qr/^$space< /;
         my $a_re = qr/^$space> /;
@@ -241,17 +302,18 @@ while (<PATCH>) {
 close PATCH;
 
 if (ref $patch eq 'Patch') {
-    $patch->note("Hmm...  I can't seem to find a patch in there anywhere.\n");
+    die "Hmm...  I can't seem to find a patch in there anywhere.\n";
 } else {
     $patch->end;
 }
 
+exit(EX_REJECTS) if $patch->error;
 $patch->note("done\n");
-exit $patch->error ? 1 : 0;
+exit EX_SUCCESS;
 
 END {
     close STDOUT || die "$0: can't close stdout: $!\n";
-    $? = 1 if $? == 255;  # from die
+    $? = EX_FAILURE if $? == 255;  # from die
 }
 
 
@@ -268,14 +330,9 @@ BEGIN {
     $ERROR = 0;
 }
 
-sub import {
-    no strict 'refs';
-    *{caller() . '::throw'} = \&throw;
-    @{caller() . '::ISA'}   = 'Patch';
-}
-
 # Simple throw/catch error handling.
 sub throw {
+    my $self = shift;
     $@ = join '', @_;
     $@ .= sprintf " at %s line %d\n", (caller)[1..2] unless $@ =~ /\n\z/;
     goto CATCH;
@@ -331,18 +388,14 @@ sub bless {
                {};
     bless $self, $class;
 
-    # 'options' and 'garbage'  are probably better off as class
-    # data.  Why didn't I do that before?  But it's not broken
-    # so I'm not fixing it.
-    $self->{options} = $options;    # @options
+    # Item 'garbage' is probably better off as class data
     $self->{garbage} = [];          # garbage lines
     $self->{i_pos}   = 0;           # current position in 'in' file
-    $self->{o_pos}   = 0;           # just for symmetry
     $self->{i_lines} = 0;           # lines read in 'in' file
     $self->{o_lines} = 0;           # lines written to 'out' file
     $self->{hunk}    = 1;           # current hunk number
     $self->{rejects} = [];          # save rejected hunks here
-    $self->{fuzz}    = 2  unless defined $self->{fuzz} && $self->{fuzz} >= 0;
+    $self->{'fuzz'}  = 2 unless defined $self->{'fuzz'};
     $self->{ifdef}   = '' unless defined $self->{ifdef};
 
     # Skip patch?
@@ -356,14 +409,8 @@ sub bless {
     my $n = $type eq 'ed' ? 'n' : '';
     $self->note("Hmm...  Looks like a$n $type diff to me...\n");
 
-    # Change directories.
-    for ($self->{directory}) {
-        defined or last;
-        chdir $_ or $self->skip("Can't chdir '$_': $!\n");
-    }
-
     # Get original file to patch...
-    my $orig = $self->{origfile};                   # ...from -o
+    my $orig = $self->{origfile};
 
     unless (defined $orig) {
         $orig = $self->rummage($garbage);           # ...from leading garbage
@@ -381,7 +428,9 @@ sub bless {
     }
 
     # Make sure original file exists.
-    if ($self->{force} || $self->{batch}) {
+    if (-e $orig && ! -f $orig) {
+        $self->skip("File '$orig' is not a regular file\n");
+    } elsif ($self->{'force'} || $self->{'batch'}) {
         -e $orig or $self->skip;
     } else {
         until (-e $orig) {
@@ -394,6 +443,7 @@ sub bless {
         }
     }
 
+    my $to_stdout = 0;
     my ($in, $out);
 
     # Create backup file.  I have no clue what Plan A is really supposed to be.
@@ -401,12 +451,18 @@ sub bless {
         $self->note("Checking patch against file $orig using Plan C...\n");
         ($in, $out) = ($orig, '');
     } elsif (defined $self->{output}) {
+        $to_stdout = 1 if $self->{output} eq '-';
+        if (!$to_stdout && -d $self->{'output'}) {
+            die "$0: output file '$self->{output}' is a directory\n";
+        }
         $self->note("Patching file $orig using Plan B...\n");
         local $_ = $self->{output};
-        $self->skip if -e && not rename $_, $self->backup($_) and
-            $self->{force} || $self->{batch} || prompt (
-                'Failed to backup output file--skip this patch? [n] '
-            ) =~ /^[yY]/;
+        unless ($to_stdout) {
+            $self->skip if -e && not rename $_, $self->backup($_) and
+                $self->{force} || $self->{batch} || prompt (
+                    'Failed to backup output file--skip this patch? [n] '
+                ) =~ /^[yY]/;
+        }
         ($in, $out) = ($orig, $self->{output});
     } else {
         $self->note("Patching file $orig using Plan A...\n");
@@ -422,28 +478,29 @@ sub bless {
     }
 
     # Open original file.
-    local *IN;
-    open IN, '<', $in or $self->skip("Couldn't open INFILE: $!\n");
-    binmode IN;
-    $self->{i_fh} = *IN;    # input filehandle
-    $self->{i_file} = $in;  # input filename
-
-    # Like /dev/null
-    local *NULL;
-    tie *NULL, 'Dev::Null';
+    my $in_fh;
+    open $in_fh, '<', $in
+        or $self->skip("Cannot open input file '$in': $!\n");
+    binmode $in_fh;
+    $self->{'i_fh'} = $in_fh;
+    $self->{'i_file'} = $in;
 
     # Open output file.
     if ($self->{check}) {
-        $self->{o_fh} = *NULL;     # output filehandle
-        $self->{d_fh} = *NULL;     # ifdef filehandle
+        $self->{'o_fh'} = $self->{'d_fh'} = File::Temp->new();
+    } elsif ($to_stdout) {
+        $self->{'o_fh'} = *STDOUT;
+        $self->{'o_file'} = '-';
+        $self->{'d_fh'} = length $self->{'ifdef'} ? *STDOUT : File::Temp->new;
     } else {
-        local *OUT;
-        open OUT, '+>', $out or $self->skip("Couldn't open OUTFILE: $!\n");
-        binmode OUT;
-        $|++, select $_ for select OUT;
-        $self->{o_fh}   = *OUT;
-        $self->{o_file} = $out;
-        $self->{d_fh}   = length $self->{ifdef} ? *OUT : *NULL;
+        my $out_fh;
+        open $out_fh, '+>', $out
+            or $self->skip("Cannot open output file '$out': $!\n");
+        binmode $out_fh;
+        $|++, select $_ for select $out_fh;
+        $self->{'o_fh'}   = $out_fh;
+        $self->{'o_file'} = $out;
+        $self->{'d_fh'}   = length $self->{'ifdef'} ? $out_fh : File::Temp->new();
     }
 
     $self->{'reject-file'} = "$out.rej" unless defined $self->{'reject-file'};
@@ -480,7 +537,7 @@ sub skip {
 # Let user know what's happening.
 sub note {
     my $self = shift;
-    print @_ unless $self->{silent} || $self->{skip};
+    print { *STDERR } @_ unless $self->{silent} || $self->{skip};
 }
 
 # Add to lines of leading garbage.
@@ -501,12 +558,10 @@ sub error {
 # End of patch clean up.
 sub end {
     my $self = shift;
-
-    return if ref $self eq 'Patch';
-
+    my $class = ref $self;
+    return if $class eq 'Patch';
     return $self->restore_file if $self->{skip};
-
-    $self->print_tail;
+    $self->print_tail if $class ne 'Patch::Ed';
     $self->print_rejects;
     $self->remove_empty_files;
 }
@@ -654,7 +709,7 @@ sub suffix_backup {
 sub apply {
     my ($self, $i_start, $o_start, @hunk) = @_;
 
-    $self->{skip} and throw 'SKIP...ignore this patch';
+    $self->{skip} and $self->throw('SKIP...ignore this patch');
 
     if ($self->{reverse}) {
         my $not = { qw/ + - - + / };
@@ -702,22 +757,15 @@ sub apply {
                             $self->{reverse} = 0;
                             $position = 0;
                             prompt ('Apply anyway? [n] ') =~ /^[yY]/
-                                or throw 'SKIP...ignore this patch';
+                                or $self->throw('SKIP...ignore this patch');
                         }
                     }
                 } else {
-                    throw 'SKIP...ignore this patch' if $self->{forward};
-                }
-            } else {
-                unless ($position || $self->{reverse} || $self->{force}) {
-                    $self->{reverse_check} = 1;
-                    $self->{reverse} = 1;
-                    shift;
-                    return $self->apply(@_);
+                    $self->throw('SKIP...ignore this patch') if $self->{forward};
                 }
             }
         }
-        $position or throw "Couldn't find anywhere to put hunk.\n";
+        $position or $self->throw("Couldn't find anywhere to put hunk.\n");
     } else {
         # No context.  Use given position.
         $position = [$i_start - $self->{i_lines} - 1]
@@ -729,7 +777,7 @@ sub apply {
     my $ifdef = $self->{ifdef};
 
     # Make sure we're where we left off.
-    seek $in, $self->{i_pos}, 0 or throw "Couldn't seek INFILE: $!";
+    seek $in, $self->{i_pos}, 0 or $self->throw("Couldn't seek INFILE: $!");
 
     my $line = $self->{o_lines} + $position->[0] + 1;
     my $off  = $line - $o_start;
@@ -795,7 +843,7 @@ sub index {
     my ($self, $match, $pos, $lines) = @_;
     my $in = $self->{i_fh};
 
-    seek $in, $pos, 0 or throw "Couldn't seek INFILE [$in, 0, $pos]: $!";
+    seek($in, $pos, 0) or $self->throw("Couldn't seek INFILE: $!");
     <$in> while $lines--;
 
     if ($self->{'ignore-whitespace'}) {
@@ -815,7 +863,7 @@ sub index {
                 $line eq $match->[$_] or $fail++, last;
             }
             if ($fail) {
-                seek $in, $tell, 0 or throw "Couldn't seek INFILE: $!";
+                seek($in, $tell, 0) or $self->throw("Couldn't seek INFILE: $!");
                 <$in>;
             } else {
                 return ($tell, $line);
@@ -836,7 +884,7 @@ sub index {
 package
 	Patch::Context; # hide from PAUSE
 
-BEGIN { Patch->import }
+use base 'Patch';
 
 # Convert hunk to unified diff, then apply.
 sub apply {
@@ -890,48 +938,15 @@ sub rummage {
 package
 	Patch::Ed; # hide from PAUSE
 
-BEGIN { Patch->import }
+use base 'Patch';
 
 # Pipe ed script to ed or try to manually process.
 sub apply {
     my ($self, @cmd) = @_;
 
-    $self->{skip} and throw 'SKIP...ignore this patch';
+    $self->{skip} and $self->throw('SKIP...ignore this patch');
 
     my $out = $self->{o_fh};
-
-    $self->{check} and goto PLAN_J;
-
-    # We start out by adding a magic line to our output.  If this line
-    # is still there after piping to ed, then ed failed.  We do this
-    # because win32 will silently fail if there is no ed program.
-    my $magic = "#!/i/want/a/moogle/stuffy\n";
-    print $out $magic;
-
-    # Pipe to ed.
-    eval {
-        local $SIG{PIPE} = sub { die 'Pipe broke...' };
-        local $SIG{CHLD} = sub { die 'Bad child...' };
-        open ED, '|-', qw(ed - -s), $self->{i_file} or die "Couldn't fork ed: $!";
-        print ED map @$_, @cmd               or die "Couldn't print ed: $!";
-        print ED "1,\$w $self->{o_file}"     or die "Couldn't print ed: $!";
-        close ED                             or die "Couldn't close ed: $?";
-    };
-
-    # Did pipe to ed work?
-    unless ($@ or <$out> ne $magic) {
-        $self->note("Hunk #$self->{hunk} succeeded at 1.\n");
-        return 1;
-    }
-
-    # Erase any trace of magic line.
-    truncate $out, 0 or throw "Couldn't truncate OUT: $!";
-    seek $out, 0, 0  or throw "Couldn't seek OUT: $!";
-
-    # Try to apply ed script by hand.
-    $self->note("Pipe to ed failed.  Switching to Plan J...\n");
-
-    PLAN_J:
 
     # Pre-process each ed command.  Ed diffs are reversed (so that each
     # command doesn't end up changing the line numbers of subsequent
@@ -943,9 +958,16 @@ sub apply {
         my @hunk = @{$cmd[$i]};
 
         shift(@hunk) =~ m!^(\d+)(?:,(\d+))?([acds])!
-            or throw "Unable to parse ed script.";
+            or $self->throw('Unable to parse ed script');
 
-        my ($start, $end, $cmd) = ($1, $2 || $1, $3);
+        my ($start, $end, $cmd) = ($1, $2, $3);
+        $end = $start unless defined $end; # 0 can appear
+        if ($start > $end) {
+            $self->throw("Invalid address range: $start,$end\n");
+        }
+        if ($start == 0 && $cmd ne 'a') {
+            $self->throw("Address zero invalid for command: $start,$end$cmd\n");
+        }
 
         # We don't parse substitution commands and assume they all mean
         # s/\.\././ even if they really mean s/\s+// or such.  And we
@@ -954,6 +976,8 @@ sub apply {
             $cmd[$i] = '';
             s/\.\././ for @{$cmd[$i-1][3]};
             next;
+        } elsif ($cmd eq 'a') {
+            $start = $end if $start < $end; # "1,10a" takes 10 as target
         }
 
         # Remove '.' line used to terminate hunks.
@@ -1039,24 +1063,10 @@ sub apply {
     return;
 }
 
-# End of patch clean up.  $self->print_tail is omitted because ed diffs are
-# applied all at once rather than one hunk at a time.
-sub end {
-    my $self = shift;
-
-    return $self->restore_file if $self->{skip};
-
-    $self->print_rejects;
-    $self->remove_empty_files;
-}
-
-
-
-
 package
 	Patch::Normal; # hide from PAUSE
 
-BEGIN { Patch->import }
+use base 'Patch';
 
 # Convert hunk to unified diff, then apply.
 sub apply {
@@ -1077,7 +1087,7 @@ sub apply {
 package
 	Patch::Unified; # hide from PAUSE
 
-BEGIN { Patch->import }
+use base 'Patch';
 
 # Check for filename in diff header, then in 'Index:' line.
 sub rummage {
@@ -1104,9 +1114,18 @@ package
 
 sub TIEHANDLE {
     my ($class, $file) = @_;
-    local *FH;
-    open *FH, '<', $file or return;
-    bless [*FH], $class;
+    my $fh;
+    if ($file eq '-') {
+        $fh = *STDIN;
+    } else {
+        if (-d $file) {
+            die "$0: '$file' is a directory\n";
+        }
+        unless (open $fh, '<', $file) {
+            die "$0: failed to open '$file': $!\n";
+	}
+    }
+    bless [$fh], $class;
 }
 
 sub READLINE {
@@ -1123,25 +1142,6 @@ sub CLOSE {
     my $self = shift;
     $self = undef;
 }
-
-
-
-
-package
-	Dev::Null; # hide from PAUSE
-
-# Create filehandles that go nowhere.
-
-sub TIEHANDLE { bless \my $null }
-sub PRINT {}
-sub PRINTF {}
-sub WRITE {}
-sub READLINE {''}
-sub READ {''}
-sub GETC {''}
-
-
-
 
 __END__
 
@@ -1290,7 +1290,7 @@ specified any argument from B<-b> will be ignored.
 forces I<patch> to interpret the patch file as a context
 diff.
 
-=item -C or --check
+=item -C or --check or --dry-run
 
 checks  that  the patch would apply cleanly, but does
 not modify anything.
@@ -1304,7 +1304,7 @@ directory, and cd to it before doing anything else.
 
 causes  I<patch>  to use the "#ifdef...#endif" construct
 to mark changes.  The argument following will be used
-as the differentiating symbol.  [see L<"note 7">]
+as the differentiating symbol.
 
 =item -e or --ed
 
@@ -1491,11 +1491,6 @@ Always make simple backups.
 
 =back
 
-=item -xnumber or --debug number
-
-sets  internal  debugging  flags,
-and is of no interest to I<patch> patchers [see L<"note 8">].
-
 =back
 
 =head1 ENVIRONMENT
@@ -1548,10 +1543,12 @@ text  in  the  patch  file and that I<patch> is attempting to
 intuit whether there is a patch in that text and,  if  so,
 what kind of patch it is.
 
-I<Patch> will exit with a non-zero status if any reject files
-were created.  When applying a set of patches in a loop it
-behooves  you to check this exit status so you don't apply
-a later patch to a partially patched file.
+=head1 EXIT STATUS
+
+The patch utility exits with status of 0 if the input diff
+was applied successfully. If part of the input was rejected
+an exit status of 1 is used. Exit status 2 indicates an error
+occurred.
 
 =head1 CAVEATS
 
@@ -1630,15 +1627,6 @@ thinks the failed hunks belong in the new file rather than the old one.
 
 If the original file cannot be found or is read-only, but a suitable SCCS or RCS
 file is handy, GNU patch will attempt to get or check out the file.
-
-=head2 note 7
-
-GNU patch requires a space between the B<-D> and the argument.  This has been
-made optional.
-
-=head2 note 8
-
-There are currently no debugging flags to go along with B<-x>.
 
 =head1 AUTHOR
 

@@ -11,114 +11,163 @@ License: perl
 
 =cut
 
-
-#
-# cut -- remove sections from each line of files
-#
-#        Rich Lafferty <rich@alcor.concordia.ca>
-#        Thu Mar  4 02:33:30 EST 1999
-#
-#   Perl Power Tools -- http://language.perl.com/ppt/
-#
-
-$^W = 1;    # -w
 use strict;
-use Getopt::Std;
-use File::Basename;
 
-## What's my name?
+use File::Basename qw(basename);
+use Getopt::Std qw(getopts);
+
+use constant EX_SUCCESS => 0;
+use constant EX_FAILURE => 1;
+
 my $me = basename($0);
 
-## Grab options
-getopts ('b:c:d:f:ns', \my %opt);
+my %opt;
+getopts('b:c:d:f:ns', \%opt) or usage();
 
 # There's no difference between -b and -c on any unix I
 # use regularly -- it's for i18n. Thus, -n is a noop, too.
-$opt{b} = $opt{c} if defined $opt{c};
+if (defined $opt{'b'}) {
+    usage() if $opt{'f'};
+    handle_b($opt{'b'});
+}
+elsif (defined $opt{'c'}) {
+    usage() if $opt{'f'};
+    handle_b($opt{'c'});
+}
+elsif (defined $opt{'f'}) {
+    handle_f($opt{'f'}, $opt{'d'}, $opt{'s'});
+}
+else {
+    warn "$me: byte, character or field list required\n";
+    usage();
+}
+exit EX_SUCCESS;
 
-## Byte operations
-if (defined ($opt{b})) {
-
-    my @list = split (/,/, $opt{b});
-
-    while (<>) {
-	chomp;
-
-	foreach my $item (@list) {
-	    my ($start,$end) = split (/-/, $item);
-	    die "$me: invalid byte list\nType '$me' alone for usage.\n"
-		if ($start and $end and $start > $end);  # parameters overlap?
-
-	    # change cut's list parameters to substr's parameters
-	    $start--;			   # cut counts from 1, not 0
-	    $start = 0 if $start < 0;
-	    $end = $start + 1 unless $item =~ /-/;
-	    $start = length if $start > length;
-
-	    if ($end) {
-		$end = length if $end > length;
-		printf ("%s", substr ($_, $start, $end - $start));
-	    } else {
-		printf ("%s", substr ($_, $start));
-	    }
-	}
-	print "\n";
+sub checknum {
+    my $n = shift;
+    if ($n !~ m/\A\-?[0-9]+\Z/) {
+        warn "$me: unexpected byte or field number: '$n'\n";
+        exit EX_FAILURE;
     }
-    exit 0;
+    if ($n == 0) {
+        warn "$me: bytes and fields are numbered from 1\n";
+        exit EX_FAILURE;
+    }
 }
 
-## Field operations
-elsif (defined ($opt{f})) {
+sub parse_fields {
+    my $spec = shift;
+    my @list = split /,/, $spec;
 
-    my @list = split (/,/, $opt{f});
-
-    my $delim = "\t";
-    $delim = substr ($opt{d}, 0, 1) if defined $opt{d};
-
-    while (<>) {
-	chomp;
-
-	# Only waste time on lines with delimiters
-	if (/$delim/) {
-	    foreach my $item (@list) {
-		my ($start,$end) = split (/-/, $item);
-		die "$me: invalid byte list\nType '$me' alone for usage.\n"
-		    if ($start and $end and $start > $end);   # parameters overlap?
-
-		# change cut's list parameters to substr's parameters
-		$start--;			   # cut counts from 1, not 0
-		$start = 0 if $start < 0;
-		$end = $start + 1 unless $item =~ /-/;
-
-		my @hunk = split (/$delim/, $_);
-
-		# don't let parameters exceed number of fields
-		$end = @hunk if (! $end or $end > @hunk);
-		$start = @hunk if $start > @hunk;
-
-		# If start of field is bigger than number of items, cut(1)
-		# still outputs a newline -- but we won't enter the for()
-		print "\n" if ($start == $end and $item eq $list[$#list]);
-
-		for (my $i = $start; $i < $end; $i++) {
-		    print $hunk[$i];
-		    if ($item eq $list[$#list] and $i == $end - 1) {  # if done
-			print "\n";
-		    } else {
-			print $delim;
-		    }
-		}
-	    }
-	} else {  # no delimiter in line
-	    print "$_\n" unless $opt{"s"};
-	}
+    my $to_end;
+    my @cols;
+    foreach my $item (@list) {
+        my ($from, $is_range, $to);
+        if ($item =~ m/\A([0-9]*)(\-?)([0-9]*)\z/) {
+            $from = $1;
+            $is_range = $2;
+            $to = $3;
+        }
+        else {
+                warn "$me: invalid byte list: '$item'\n";
+                exit EX_FAILURE;
+        }
+        checknum($from) if length($from);
+        checknum($to)   if length($to);
+        if (!length($from) && !length($to)) { # reject lone '-'
+            warn "$me: invalid byte list\n";
+            exit EX_FAILURE;
+        }
+        if (length($from) && length($to)) {
+            if ($from > $to) {
+                warn "$me: invalid range $from-$to\n";
+                exit EX_FAILURE;
+            }
+            $is_range = 0 if $from == $to;
+        }
+        if ($is_range) {
+            if (length($from) && length($to)) { # a-b
+                push @cols, $from .. $to;
+            }
+            elsif (length $from) { # a-
+                push @cols, $from;
+                $to_end = 1;
+            }
+            else { # -a
+                push @cols, 1 .. $to;
+            }
+        }
+        else {
+            push @cols, $from;
+        }
     }
-
-    exit 0;
+    my @sorted = sort { $a <=> $b } @cols;
+    unshift @sorted, $to_end;
+    return @sorted;
 }
 
-## $SIG{__CLUE__}
-print <<EOT;
+sub handle_b {
+    my $spec = shift;
+    my ($to_end, @cols) = parse_fields($spec);
+
+    while (<>) {
+        chomp;
+        my $col = 0;
+        my @chars = split //;
+        foreach my $c (@cols) {
+	    next if $c <= $col;
+            print $chars[$c - 1];
+            $col = $c;
+        }
+        if ($to_end) {
+            $col++;
+            foreach my $c ($col .. scalar(@chars)) {
+                print $chars[$c - 1];
+            }
+        }
+        print "\n";
+    }
+}
+
+sub handle_f {
+    my ($spec, $delim, $sflag) = @_;
+
+    my ($to_end, @cols) = parse_fields($spec);
+    if (defined $delim) {
+        $delim = substr $delim, 0, 1;
+    }
+    else {
+        $delim = "\t";
+    }
+    while (<>) {
+        chomp;
+
+        # Only waste time on lines with delimiters
+        if (/$delim/) {
+            my @hunk = split /$delim/;
+            my $col = 0;
+            my @out;
+            foreach my $c (@cols) {
+	        next if $c <= $col;
+                push @out, $hunk[$c - 1];
+                $col = $c;
+            }
+            if ($to_end) {
+                $col++;
+                foreach my $c ($col .. scalar(@hunk)) {
+                    push @out, $hunk[$c - 1];
+                }
+            }
+            print join($delim, @out), "\n";
+        }
+        else {  # no delimiter in line
+            print "$_\n" unless $sflag;
+        }
+    }
+}
+
+sub usage {
+    print <<EOT;
 usage:  $me -b list [-n] [file ...]
         $me -c list [file ...]
         $me -f list [-d delim] [-s] [file ...]
@@ -132,10 +181,8 @@ Each range is one of:
   -M    from first to Mth (included) byte, character or field
 
 EOT
-
-exit 1;
-
-# (Thanks to Abigail for the pod template.)
+    exit EX_FAILURE;
+}
 
 __END__
 

@@ -5,7 +5,7 @@
 Name: addbib
 Description: create or extend a bibliographic database
 Author: Jeffrey S. Haemer
-License:
+License: perl
 
 =end metadata
 
@@ -13,7 +13,6 @@ License:
 
 
 use strict;
-use warnings;
 use Getopt::Std;
 use vars qw($opt_a $opt_p);
 
@@ -34,7 +33,7 @@ my @prompts = (
 		"Keywords:\t%K",
 );
 
-if ($opt_p) {
+if (defined $opt_p) {
 	@prompts = ();
 	open my $PROMPTFILE, '<', $opt_p or die "can't read $opt_p: $!";
 	foreach (<$PROMPTFILE>) {
@@ -46,7 +45,8 @@ if ($opt_p) {
 }
 
 my $database = shift;
-open my $DATABASE, '>>', $database or die "can't append to $database: $!";
+my $DATABASE;
+open $DATABASE, '>>', $database or die "can't append to $database: $!";
 
 my $inst = <<_EOINST;
 	Addbib will prompt you for various bibliographic fields.
@@ -105,15 +105,15 @@ while (1) {
 } continue {
 	print "Continue? (y) ";
 	$_ = <>;
-	while (/^\s*(edit|ex|vi|view|emacs)\s*/) {
+	while (/^\s*(ed|edit|ex|vi|view|emacs)\s*/) {
 		close $DATABASE or die "can't close $database: $!";
-		system("$1 $database") == 0
+		system($1, $database) == 0
 		 or die "system '$1 $database' failed: $?";
-		open my $DATABASE, '>>', $database or die "can't open $database: $!";
+		open $DATABASE, '>>', $database or die "can't open $database: $!";
 		print "Continue? (y) ";
 		$_ = <>;
 	}
-	last if /^(n|q)/i;
+	last if m/\A[nq]/i;
 }
 
 close $DATABASE or die "can't close $database: $!";

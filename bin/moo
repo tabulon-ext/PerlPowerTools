@@ -11,47 +11,49 @@ License: perl
 
 =cut
 
-
 use strict;
 
-my ($VERSION) = '1.2';
+use List::Util qw(shuffle);
 
-# Print a usuage message on a unknown option.
-$SIG {__WARN__} = sub {
-    require File::Basename;
-    $0 = File::Basename::basename ($0);
-    if (substr ($_ [0], 0, 14) eq "Unknown option" ||
-        substr ($_ [0], 0,  5) eq "Usage") {
-        warn <<EOF;
-$0 (Perl bin utils) $VERSION
-$0 [size]
-EOF
-        exit 1;
-    }
-    else {
-        warn "$0: @_";
-    }
-};
+my ($VERSION) = '1.4';
 
-$SIG {__DIE__} = sub {
-    require File::Basename;
-    $0 = File::Basename::basename ($0);
-    die "$0: @_";
-};
-
-my $size = 4;
-
-warn "Usage" if @ARGV > 1;  # Will exit.
-
-if (@ARGV) {
-    $size = shift;
-    warn "Usage" if !$size || $size =~ /\D/;  # Will exit;
+sub usage {
+    die "usage: moo [size]\n";
 }
+
+sub get_secret {
+    my $size = shift;
+
+    my $i = $size - 1;
+    my %digits = map { $_ => 1 } (0 .. 9);
+    my @s1 = keys %digits;
+    my @s2 = shuffle(@s1);
+    return @s2[0 .. $i];
+}
+
+sub has_dupe {
+    my $guess = shift;
+    my %chars;
+    foreach my $c (split //, $guess) {
+        return 1 if exists $chars{$c};
+        $chars{$c} = 1;
+    }
+    return 0;
+}
+
+my $size = shift;
+$size = 4 unless defined $size;
+usage() if $size !~ m/\A[0-9]+\Z/ or !$size;
+die "secret size must be within range: 1-10\n" if $size > 10;
+usage() if @ARGV;
 
 print "MOO\n";
 {
-    my   @secret_by_value = (0) x 10;
-    map {$secret_by_value [$_] ++} my @secret = map {int rand 10} 1 .. $size;
+    my @secret = get_secret($size);
+    my @secret_by_value = (0) x 10;
+    foreach my $i (@secret) {
+        $secret_by_value[$i] = 1;
+    }
 
     my $attempts = 0;
 
@@ -60,10 +62,9 @@ print "MOO\n";
     {
         print "Your guess? ";
         chomp (my $guess = <>);
+        exit if (!defined($guess) || $guess =~ m/\Aq/i);
 
-        exit if 'q' eq substr lc $guess, 0, 1;
-
-        if ($guess =~ /\D/ || length $guess != $size) {
+        if ($guess =~ /\D/ || length $guess != $size || has_dupe($guess)) {
             print "Bad guess\n";
             redo
         }
@@ -122,8 +123,8 @@ moo [size]
 
 =head1 DESCRIPTION
 
-I<moo> is a game where the user has to guess a number choosen by
-the computer. By default, the computer takes a number of four digits
+I<moo> is a game where the user guesses a random number chosen by
+the computer. By default, the computer takes a number of four distinct digits
 (including 0's), but that can be changed by giving I<moo> the number of
 digits to take.  After each guess, the number of B<bull>s and B<cow>s
 is displayed.  A B<bull> is a correctly guessed digit, in the right
